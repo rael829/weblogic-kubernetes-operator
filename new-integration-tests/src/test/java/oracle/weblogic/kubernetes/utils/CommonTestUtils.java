@@ -340,6 +340,32 @@ public class CommonTestUtils {
                                                     HelmParams opHelmParams,
                                                     boolean elkIntegrationEnabled,
                                                     String... domainNamespace) {
+    return installAndVerifyOperator(opNamespace, opServiceAccount,
+        withRestAPI, externalRestHttpsPort, opHelmParams, null, elkIntegrationEnabled, domainNamespace);
+  }
+
+  /**
+   * Install WebLogic operator and wait up to five minutes until the operator pod is ready.
+   *
+   * @param opNamespace the operator namespace in which the operator will be installed
+   * @param opServiceAccount the service account name for operator
+   * @param withRestAPI whether to use REST API
+   * @param externalRestHttpsPort the node port allocated for the external operator REST HTTPS interface
+   * @param opHelmParams the Helm parameters to install operator
+   * @param elkIntegrationEnabled true to enable ELK Stack, false otherwise
+   * @param domainNamespaceSelectionStrategy value to tell the operator
+   *                                         how to select the set of namespaces that it will manage
+   * @param domainNamespace the list of the domain namespaces which will be managed by the operator
+   * @return the operator Helm installation parameters
+   */
+  public static HelmParams installAndVerifyOperator(String opNamespace,
+                                                    String opServiceAccount,
+                                                    boolean withRestAPI,
+                                                    int externalRestHttpsPort,
+                                                    HelmParams opHelmParams,
+                                                    String domainNamespaceSelectionStrategy,
+                                                    boolean elkIntegrationEnabled,
+                                                    String... domainNamespace) {
     LoggingFacade logger = getLogger();
 
     // Create a service account for the unique opNamespace
@@ -370,6 +396,14 @@ public class CommonTestUtils {
         .imagePullSecrets(secretNameMap)
         .domainNamespaces(Arrays.asList(domainNamespace))
         .serviceAccount(opServiceAccount);
+
+    if (domainNamespaceSelectionStrategy != null) {
+      opParams = new OperatorParams()
+          .helmParams(opHelmParams)
+          .imagePullSecrets(secretNameMap)
+          .domainNamespaceSelectionStrategy(domainNamespaceSelectionStrategy)
+          .serviceAccount(opServiceAccount);
+    }
 
     // use default image in chart when repoUrl is set, otherwise use latest/current branch operator image
     if (opHelmParams.getRepoUrl() == null) {
@@ -439,6 +473,107 @@ public class CommonTestUtils {
           .until(assertDoesNotThrow(() -> operatorRestServiceRunning(opNamespace),
               "operator external service is not running"));
     }
+    return opHelmParams;
+  }
+
+  /**
+   * Install WebLogic operator and wait up to five minutes until the operator pod is ready.
+   *
+   * @param opNamespace the operator namespace in which the operator will be installed
+   * @param opServiceAccount the service account name for operator
+   * @param withRestAPI whether to use REST API
+   * @param externalRestHttpsPort the node port allocated for the external operator REST HTTPS interface
+   * @param opHelmParams the Helm parameters to install operator
+   * @param elkIntegrationEnabled true to enable ELK Stack, false otherwise
+   * @param domainNamespaceSelectionStrategy value to tell the operator
+   *                                         how to select the set of namespaces that it will manage
+   * @param domainNamespace the list of the domain namespaces which will be managed by the operator
+   * @return the operator Helm installation parameters
+   */
+  public static HelmParams installAndVerifyOperatorwithoutCrd(String opNamespace,
+                                                              String opServiceAccount,
+                                                              boolean withRestAPI,
+                                                              int externalRestHttpsPort,
+                                                              HelmParams opHelmParams,
+                                                              String domainNamespaceSelectionStrategy,
+                                                              boolean elkIntegrationEnabled,
+                                                              String... domainNamespace) {
+    LoggingFacade logger = getLogger();
+
+    // Create a service account for the unique opNamespace
+    logger.info("Creating service account");
+    assertDoesNotThrow(() -> createServiceAccount(new V1ServiceAccount()
+        .metadata(new V1ObjectMeta()
+            .namespace(opNamespace)
+            .name(opServiceAccount))));
+    logger.info("Created service account: {0}", opServiceAccount);
+
+
+    // get operator image name
+    String operatorImage = getOperatorImageName();
+    assertFalse(operatorImage.isEmpty(), "operator image name can not be empty");
+    logger.info("operator image name {0}", operatorImage);
+
+    // Create Docker registry secret in the operator namespace to pull the image from repository
+    logger.info("Creating Docker registry secret in namespace {0}", opNamespace);
+    createDockerRegistrySecret(opNamespace);
+
+    // map with secret
+    Map<String, Object> secretNameMap = new HashMap<>();
+    secretNameMap.put("name", REPO_SECRET_NAME);
+
+    // operator chart values to override
+    OperatorParams opParams = new OperatorParams()
+        .helmParams(opHelmParams)
+        .imagePullSecrets(secretNameMap)
+        .domainNamespaces(Arrays.asList(domainNamespace))
+        .serviceAccount(opServiceAccount);
+
+    // use default image in chart when repoUrl is set, otherwise use latest/current branch operator image
+    if (opHelmParams.getRepoUrl() == null) {
+      opParams.image(operatorImage);
+    }
+
+    /*
+    // install operator
+    logger.info("Installing operator in namespace {0}", opNamespace);
+    assertTrue(installOperator(opParams),
+      String.format("Failed to install operator in namespace %s", opNamespace));
+    logger.info("Operator installed in namespace {0}", opNamespace);
+
+    // list Helm releases matching operator release name in operator namespace
+    logger.info("Checking operator release {0} status in namespace {1}",
+      OPERATOR_RELEASE_NAME, opNamespace);
+    assertTrue(isHelmReleaseDeployed(OPERATOR_RELEASE_NAME, opNamespace),
+      String.format("Operator release %s is not in deployed status in namespace %s",
+        OPERATOR_RELEASE_NAME, opNamespace));
+    logger.info("Operator release {0} status is deployed in namespace {1}",
+      OPERATOR_RELEASE_NAME, opNamespace);
+
+    // wait for the operator to be ready
+    logger.info("Wait for the operator pod is ready in namespace {0}", opNamespace);
+    withStandardRetryPolicy
+      .conditionEvaluationListener(
+        condition -> logger.info("Waiting for operator to be running in namespace {0} "
+            + "(elapsed time {1}ms, remaining time {2}ms)",
+          opNamespace,
+          condition.getElapsedTimeInMS(),
+          condition.getRemainingTimeInMS()))
+      .until(assertDoesNotThrow(() -> operatorIsReady(opNamespace),
+        "operatorIsReady failed with ApiException"));
+
+    if (withRestAPI) {
+      logger.info("Wait for the operator external service in namespace {0}", opNamespace);
+      withStandardRetryPolicy
+        .conditionEvaluationListener(
+          condition -> logger.info("Waiting for operator external service in namespace {0} "
+              + "(elapsed time {1}ms, remaining time {2}ms)",
+            opNamespace,
+            condition.getElapsedTimeInMS(),
+            condition.getRemainingTimeInMS()))
+        .until(assertDoesNotThrow(() -> operatorRestServiceRunning(opNamespace),
+          "operator external service is not running"));
+    }*/
     return opHelmParams;
   }
 
